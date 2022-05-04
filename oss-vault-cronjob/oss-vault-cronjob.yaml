@@ -1,0 +1,71 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+    name: oss-vault-cronjob-cm
+data:
+  VAULT_SNAPSHOT_BUCKET: "vault-backup-snapshot"
+  GKE_REGION: "us-west-1"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oss-vault-cronjob
+spec:
+  schedule: "@every 20m"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: vault
+          volumes:
+          - name: share
+            emptyDir: {}
+          containers:
+          - name: snapshot
+            image: vault:1.10.0
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            args:
+            - -ec
+            - |
+              export VAULT_ADDR=https://vault-active.$NAMESPACE:8200
+              export VAULT_SKIP_VERIFY=true
+              export VAULT_TOKEN=$(vault write -field=token auth/approle/login role_id=$VAULT_APPROLE_ROLE_ID);
+              vault operator raft snapshot save /share/vault-raft.snap;
+              echo "snapshot completed"
+            envFrom:
+            - secretRef:
+                name: oss-vault-cronjob-roleid
+            env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            volumeMounts:
+            - mountPath: /share
+              name: share
+          - name: upload
+            image: google/cloud-sdk
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            args:
+            - -ec
+            # the script wait untill the snapshot file is available
+            # then upload to gcs bucket.
+            - |
+              until [ -f /share/vault-raft.snap ]; do sleep 5; done;
+              gsutil cp /share/vault-raft.snap gs://$VAULT_SNAPSHOT_BUCKET/$GKE_REGION/$NAMESPACE/vault_snapshot_$(date +"%Y%m%d_%H%M%S").snap;
+            env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            envFrom:
+            - configMapRef:
+                 name: oss-vault-cronjob-cm
+            volumeMounts:
+            - mountPath: /share
+              name: share
+          restartPolicy: OnFailure

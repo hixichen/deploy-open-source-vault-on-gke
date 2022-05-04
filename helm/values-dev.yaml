@@ -1,0 +1,147 @@
+# Vault Helm Chart Value Overrides
+global:
+  enabled: true
+  tlsDisable: false
+
+injector:
+  enabled: false
+
+server:
+  # Use the Open Source Image
+  image:
+    tag: "1.10.0"
+    logFormat: "json"
+
+  # These Resource Limits are in line with node requirements in the
+  # Vault Reference Architecture for a Small Cluster
+  resources:
+    #requests:
+    #  memory: 1Gi
+    #  cpu: 500m
+    #limits:
+    #  memory: 2Gi
+    #  cpu: 1000m
+
+  extraContainers:
+    - name: audit
+      image: us-west1-docker.pkg.dev/myproject/myteam/oss-vault-audit:dev
+      imagePullPolicy: Always
+      env:
+        - name: LOGROTATE_FILE_PATH
+          value: "/vault/audit/vault-audit.log"
+        - name: CRON_SCHEDULE
+          value: "* * * * *"
+        - name: CROND_LOGLEVEL
+          value: "8"
+      volumeMounts:
+        - name: audit-config
+          mountPath: /etc/logrotate.d
+        - name: audit
+          mountPath: /vault/audit
+  # extraEnvironmentVars is a list of extra environment variables to set with the stateful set. These could be
+  # used to include variables required for auto-unseal.
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/cert/vault.ca
+
+  shareProcessNamespace: true
+  
+  # For HA configuration and because we need to manually init the vault,
+  # we need to define custom readiness/liveness Probe settings
+  readinessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204"
+  livenessProbe:
+    enabled: true
+    path: "/v1/sys/health?standbyok=true"
+    initialDelaySeconds: 60
+
+  volumes:
+    - name: vault-tls
+      secret:
+        secretName: vault-tls
+    - name: audit-config
+      configMap:
+        name: oss-vault-audit-config
+  volumeMounts:
+    - name: vault-tls
+      mountPath: /vault/cert/
+      readOnly: true
+  annotations:
+      prometheus.io/scrape: 'true'
+      prometheus.io/port: '8200'
+  service:
+    publishNotReadyAddresses: false
+  dataStorage:
+    size: "1Gi"
+    #mountPath: "/vault/data"
+  # This configures the Vault Statefulset to create a PVC for audit logs.
+  # See https://www.vaultproject.io/docs/audit/index.html to know more
+  auditStorage:
+    enabled: true
+    size: "1Gi"
+    #mountPath: "/vault/audit"
+
+  standalone:
+    enabled: false
+
+  # Run Vault in "HA" mode.
+  ha:
+    enabled: true
+    replicas: 3
+    # A disruption budget limits the number of pods of a replicated application
+    # that are down simultaneously from voluntary disruptions
+    disruptionBudget:
+      enabled: false
+    raft:
+      enabled: true
+      setNodeId: true
+
+      config: |
+        ui = true
+        
+        listener "tcp" {
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          telemetry {
+                unauthenticated_metrics_access = true
+          }
+          tls_cert_file = "/vault/cert/vault.crt"
+          tls_key_file = "/vault/cert/vault.key"
+          tls_client_ca_file = "/vault/cert/vault.ca"
+        }
+    
+        storage "raft" {
+          path = "/vault/data"
+          retry_join {
+            auto_join = "provider=k8s label_selector=\"app.kubernetes.io/name=vault,component=server\" namespace=\"dev\" "
+            leader_tls_servername = "vault"
+            auto_join_scheme = "https"
+            leader_ca_cert_file = "/vault/cert/vault.ca"
+            leader_client_key_file = "/vault/cert/vault.key"
+            leader_client_cert_file = "/vault/cert/vault.crt"
+          }
+        }
+    
+        telemetry {
+          prometheus_retention_time = "12h"
+          disable_hostname = true
+        }
+    
+        service_registration "kubernetes" {}
+        
+        pid_file = "/vault/audit/pidfile.pid"
+    
+        # configuration for using auto-unseal, using Google Cloud KMS. The
+        # GKMS keys must already exist, and the cluster must have a service account
+        # that is authorized to access GCP KMS.
+        seal "gcpckms" {
+           project     = "myproject"
+           region      = "us-west1"
+           key_ring    = "vault-keyring"
+           crypto_key  = "unseal-key-dev"
+        }
+
+# Vault UI
+ui:
+  enabled: true
+  serviceType: ClusterIP

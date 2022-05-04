@@ -1,0 +1,22 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vault
+spec:
+  template:
+    spec:
+      containers:
+        - name: vault
+          # (Chen XI): this would block k8s to start the Vault for the first time.
+          # enable only when Vault is unsealed.
+          livenessProbe:
+            httpGet:
+              path: "/v1/sys/health?standbyok=true"
+              port: 8200
+              scheme: HTTP
+            failureThreshold: 2
+            initialDelaySeconds: 60
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 3

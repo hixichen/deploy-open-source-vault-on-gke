@@ -1,0 +1,21 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oss-vault-audit-config
+data:
+  audit-log.conf: |
+    /vault/audit/vault-*.log {
+        missingok
+        rotate 5
+        size 1M
+        compress
+        dateformat -%Y%m%d_%H%M%S
+        notifempty
+        copytruncate
+        postrotate
+          set -ue
+          # send SIGHUP to Vault container.
+          kill -1 $(cat /vault/audit/pidfile.pid)
+        endscript
+    }
